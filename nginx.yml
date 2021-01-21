@@ -1,0 +1,181 @@
+- hosts: all
+  vars:
+    domain: clinton.bloodworth.dev
+    email: clinton@bloodworth.dev
+  handlers:
+    - name: restart ssh
+      service: name=ssh state=restarted
+    - name: restart ufw
+      service: name=ufw state=restarted
+  gather_facts: false # https://gist.github.com/gwillem/4ba393dceb55e5ae276a87300f6b8e6f (Ubuntu 20.04)
+  pre_tasks:
+    - name: install python # https://gist.github.com/gwillem/4ba393dceb55e5ae276a87300f6b8e6f (Ubuntu 20.04)
+      raw: test -e /usr/bin/python || (apt -y update && apt install -y python2-minimal)
+      register: output
+      changed_when: output.stdout != ""
+    - setup: # https://gist.github.com/gwillem/4ba393dceb55e5ae276a87300f6b8e6f (Ubuntu 20.04)
+    - name: install fail2ban
+      apt:
+        name: fail2ban
+    - name: install ufw
+      apt:
+        name: ufw
+    - name: configure ssh
+      lineinfile: >
+        dest=/etc/ssh/sshd_config
+        line='{{ item.key }} {{ item.value }}'
+        regexp='^#?{{ item.key }}'
+        state=present
+        validate='/usr/sbin/sshd -t -f %s'
+      with_items:
+        - { key: "AllowUsers", value: "root" }
+        - { key: "LoginGraceTime", value: "15" }
+        - { key: "PasswordAuthentication", value: "no" }
+        - { key: "UsePAM", value: "no" }
+      notify:
+        - restart ssh
+    - name: configure ufw
+      ufw:
+        logging: off
+        policy: deny
+        state: enabled
+      notify:
+        - restart ufw
+    - name: configure ufw rules
+      ufw: "{{ item }}"
+      with_items:
+        - { port: "22", proto: tcp, rule: limit }
+        - { port: "80", proto: tcp, rule: allow }
+        - { port: "443", proto: tcp, rule: allow }
+      notify:
+        - restart ufw
+    - name: copy public files
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: /usr/share/nginx/html
+        owner: nginx
+        group: nginx
+        mode: "0644"
+      with_fileglob:
+        - "files/public/*"
+    - name: copy dhparam.pem
+      ansible.builtin.copy:
+        src: files/dhparam.pem
+        dest: /etc/ssl/private/dhparam.pem
+        owner: nginx
+        group: nginx
+        mode: "0600"
+    - name: copy example.com.cert
+      ansible.builtin.copy:
+        src: files/example.com.cert
+        dest: /etc/ssl/private/example.com.cert
+        owner: nginx
+        group: nginx
+        mode: "0644"
+    - name: copy example.com.key
+      ansible.builtin.copy:
+        src: files/example.com.key
+        dest: /etc/ssl/private/example.com.key
+        owner: nginx
+        group: nginx
+        mode: "0644"
+
+  roles:
+    - role: unattended
+      unattended_origins_patterns:
+        - unattended_automatic_reboot: true
+        - unattended_remove_unused_dependencies: true
+        - unattended_mail_only_on_error: true
+        - unattended_mail: "{{ email }}"
+    - role: letsencrypt
+      letsencrypt_email: "{{ email }}"
+      letsencrypt_renewal_command_args: '--renew-hook "service nginx restart"'
+      letsencrypt_cert_domains:
+        - "{{ domain }}"
+      notify:
+        - restart nginx
+    - role: nginx.install
+      nginx_start: false
+    - role: nginx.configure
+      nginx_config_main_template_enable: true
+      nginx_config_main_template:
+        http_enable: true
+        http_settings:
+          access_log_format:
+            - name: main
+              format: |
+                '$remote_addr - $remote_user [$time_local] "$request" '
+                '$status $body_bytes_sent "$http_referer" '
+                '"$http_user_agent" "$http_x_forwarded_for"'
+          cache: false
+          keyval: false
+          keepalive_timeout: 65
+          rate_limit: false
+          server_tokens: "off"
+        gzip:
+          enable: true
+          buffers:
+            number: 32
+            size: 4k
+          types:
+            - text/html
+            - text/css
+        stream_enable: false
+        user: nginx
+        worker_connections: 1024
+        worker_processes: auto
+      nginx_config_http_template_enable: true
+      nginx_config_http_template:
+        - servers:
+            - listen:
+                - ip: 0.0.0.0
+                  port: 80
+                - ip: 0.0.0.0
+                  port: 443
+              server_name: _
+              returns:
+                reject:
+                  code: 444
+                  location: /
+              ssl:
+                cert: /etc/ssl/private/example.com.cert
+                key: /etc/ssl/private/example.com.key
+            - listen:
+                - ip: 0.0.0.0
+                  port: 80
+                  returns:
+                    redirect:
+                      code: 301
+                      value: https://$host$request_uri
+                - ip: 0.0.0.0
+                  port: 443
+                  ssl: true
+              access_log: "off"
+              add_headers:
+                content_security_policy:
+                  name: Strict-Transport-Security
+                  value: Content-Security-Policy
+                strict_transport_security:
+                  name: Strict-Transport-Security
+                  value: max-age=15768000; includeSubDomains; preload
+                x_content_type_options:
+                  name: X-Content-Type-Options
+                  value: nosniff
+                x_frame_options:
+                  name: X-Frame-Options
+                  value: SAMEORIGIN
+              root: /usr/share/nginx/html
+              server_name: clinton.bloodworth.dev
+              ssl:
+                cert: /etc/letsencrypt/live/{{ domain }}/fullchain.pem
+                ciphers: AES256+EECDH:AES256+EDH:!aNULL
+                dhparam: /etc/ssl/private/dhparam.pem
+                ecdh_curve: secp384r1
+                key: /etc/letsencrypt/live/{{ domain }}/privkey.pem
+                prefer_server_ciphers: true
+                protocols: TLSv1.3
+                session_cache: shared:SSL:10m
+                session_timeout: 5m
+                stapling: true
+                stapling_verify: true
+                trusted_cert: /etc/letsencrypt/live/{{ domain }}/chain.pem
