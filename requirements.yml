@@ -1,0 +1,8 @@
+- name: letsencrypt
+  src: https://github.com/thefinn93/ansible-letsencrypt
+- name: nginx.configure
+  src: https://github.com/nginxinc/ansible-role-nginx-config
+- name: nginx.install
+  src: https://github.com/nginxinc/ansible-role-nginx
+- name: unattended
+  src: https://github.com/jnv/ansible-role-unattended-upgrades
